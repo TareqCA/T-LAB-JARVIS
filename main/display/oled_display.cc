@@ -76,11 +76,11 @@ OledDisplay::OledDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handl
         return;
     }
 
-    if (height_ == 64) {
-        SetupUI_128x64();
-    } else {
-        SetupUI_128x32();
-    }
+    if (height_ >= 64) {
+    SetupUI_128x64();
+} else {
+    SetupUI_128x32();
+}
 }
 
 OledDisplay::~OledDisplay() {
