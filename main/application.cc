@@ -11,6 +11,8 @@
 #include "settings.h"
 
 #include <cstring>
+#include <cctype>
+#include <string>
 #include <esp_log.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
@@ -101,7 +103,7 @@ void Application::Initialize() {
     // Set network event callback for UI updates and network state handling
     board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
         auto display = Board::GetInstance().GetDisplay();
-        
+
         switch (event) {
             case NetworkEvent::Scanning:
                 display->ShowNotification(Lang::Strings::SCANNING_WIFI, 30000);
@@ -166,7 +168,7 @@ void Application::Run() {
     // Set the priority of the main task to 10
     vTaskPrioritySet(nullptr, 10);
 
-    const EventBits_t ALL_EVENTS = 
+    const EventBits_t ALL_EVENTS =
         MAIN_EVENT_SCHEDULE |
         MAIN_EVENT_SEND_AUDIO |
         MAIN_EVENT_WAKE_WORD_DETECTED |
@@ -259,7 +261,7 @@ void Application::Run() {
             clock_ticks_++;
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
-        
+
             // T-Lab AI: close only an unanswered follow-up window.
             if (GetDeviceState() == kDeviceStateListening && standby_armed) {
                 if (IsVoiceDetected()) {
@@ -375,7 +377,7 @@ void Application::CheckAssetsVersion() {
         ESP_LOGW(TAG, "Assets partition is disabled for board %s", BOARD_NAME);
         return;
     }
-    
+
     Settings settings("assets", true);
     // Check if there is a new assets need to be downloaded
     std::string download_url = settings.GetString("download_url");
@@ -386,7 +388,7 @@ void Application::CheckAssetsVersion() {
         char message[256];
         snprintf(message, sizeof(message), Lang::Strings::FOUND_NEW_ASSETS, download_url.c_str());
         Alert(Lang::Strings::LOADING_ASSETS, message, "cloud_arrow_down", Lang::Sounds::OGG_UPGRADE);
-        
+
         // Wait for the audio service to be idle for 3 seconds
         vTaskDelay(pdMS_TO_TICKS(3000));
         SetDeviceState(kDeviceStateUpgrading);
@@ -517,13 +519,13 @@ void Application::InitializeProtocol() {
         last_error_message_ = message;
         xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
     });
-    
+
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
         if (GetDeviceState() == kDeviceStateSpeaking) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
-    
+
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
@@ -531,7 +533,7 @@ void Application::InitializeProtocol() {
                 protocol_->server_sample_rate(), codec->output_sample_rate());
         }
     });
-    
+
     protocol_->OnAudioChannelClosed([this, &board]() {
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         Schedule([this]() {
@@ -540,7 +542,7 @@ void Application::InitializeProtocol() {
             SetDeviceState(kDeviceStateIdle);
         });
     });
-    
+
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
@@ -548,6 +550,7 @@ void Application::InitializeProtocol() {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
+                    if (!protocol_ || !protocol_->IsAudioChannelOpened() || GetDeviceState() == kDeviceStateIdle) return;
                     aborted_ = false;
                     SetDeviceState(kDeviceStateSpeaking);
                 });
@@ -574,7 +577,27 @@ void Application::InitializeProtocol() {
             auto text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(text)) {
                 ESP_LOGI(TAG, ">> %s", text->valuestring);
-                Schedule([display, message = std::string(text->valuestring)]() {
+                Schedule([this, display, message = std::string(text->valuestring)]() {
+                    std::string command;
+                    for (unsigned char c : message) {
+                        if (std::isalnum(c)) command += static_cast<char>(std::tolower(c));
+                        else if (std::isspace(c) || std::ispunct(c)) {
+                            if (!command.empty() && command.back() != ' ') command += ' ';
+                        } else command += static_cast<char>(c);
+                    }
+                    if (!command.empty() && command.back() == ' ') command.pop_back();
+                    if (command.compare(0, 7, "jarvis ") == 0) command.erase(0, 7);
+                    if (command == "standby" || command == "stand by" ||
+                        command == "go to sleep" || command == "stop listening" ||
+                        command == "good night" || command == "go to standby") {
+                        ESP_LOGI(TAG, "T-Lab AI: Voice Standby");
+                        audio_service_.EnableVoiceProcessing(false);
+                        if (GetDeviceState() == kDeviceStateSpeaking) AbortSpeaking(kAbortReasonNone);
+                        audio_service_.ResetDecoder();
+                        if (protocol_ && protocol_->IsAudioChannelOpened()) protocol_->CloseAudioChannel();
+                        SetDeviceState(kDeviceStateIdle);
+                        return;
+                    }
                     display->SetChatMessage("user", message.c_str());
                 });
             }
@@ -628,7 +651,7 @@ void Application::InitializeProtocol() {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
         }
     });
-    
+
     protocol_->Start();
 }
 
@@ -639,7 +662,7 @@ void Application::ShowActivationCode(const std::string& code, const std::string&
     };
     static const std::array<digit_sound, 10> digit_sounds{{
         digit_sound{'0', Lang::Sounds::OGG_0},
-        digit_sound{'1', Lang::Sounds::OGG_1}, 
+        digit_sound{'1', Lang::Sounds::OGG_1},
         digit_sound{'2', Lang::Sounds::OGG_2},
         digit_sound{'3', Lang::Sounds::OGG_3},
         digit_sound{'4', Lang::Sounds::OGG_4},
@@ -696,7 +719,7 @@ void Application::StopListening() {
 
 void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
-    
+
     if (state == kDeviceStateActivating) {
         SetDeviceState(kDeviceStateIdle);
         return;
@@ -750,7 +773,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
 
 void Application::HandleStartListeningEvent() {
     auto state = GetDeviceState();
-    
+
     if (state == kDeviceStateActivating) {
         SetDeviceState(kDeviceStateIdle);
         return;
@@ -764,7 +787,7 @@ void Application::HandleStartListeningEvent() {
         ESP_LOGE(TAG, "Protocol not initialized");
         return;
     }
-    
+
     if (state == kDeviceStateIdle) {
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
@@ -783,7 +806,7 @@ void Application::HandleStartListeningEvent() {
 
 void Application::HandleStopListeningEvent() {
     auto state = GetDeviceState();
-    
+
     if (state == kDeviceStateAudioTesting) {
         audio_service_.EnableAudioTesting(false);
         SetDeviceState(kDeviceStateWifiConfiguring);
@@ -802,7 +825,7 @@ void Application::HandleWakeWordDetectedEvent() {
     }
 
     auto state = GetDeviceState();
-    
+
     if (state == kDeviceStateIdle) {
         audio_service_.EncodeWakeWord();
         auto wake_word = audio_service_.GetLastWakeWord();
@@ -864,7 +887,7 @@ void Application::HandleStateChangedEvent() {
     auto display = board.GetDisplay();
     auto led = board.GetLed();
     led->OnStateChanged();
-    
+
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
@@ -890,7 +913,7 @@ void Application::HandleStateChangedEvent() {
                 if (listening_mode_ == kListeningModeAutoStop) {
                     audio_service_.WaitForPlaybackQueueEmpty();
                 }
-                
+
                 // Send the start listening command
                 protocol_->SendStartListening(listening_mode_);
                 audio_service_.EnableVoiceProcessing(true);
@@ -1015,7 +1038,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
     }
 
     auto state = GetDeviceState();
-    
+
     if (state == kDeviceStateIdle) {
         audio_service_.EncodeWakeWord();
 
@@ -1033,7 +1056,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
         Schedule([this]() {
             AbortSpeaking(kAbortReasonNone);
         });
-    } else if (state == kDeviceStateListening) {   
+    } else if (state == kDeviceStateListening) {
         Schedule([this]() {
             if (protocol_) {
                 protocol_->CloseAudioChannel();
@@ -1109,4 +1132,3 @@ void Application::ResetProtocol() {
         protocol_.reset();
     });
 }
-
