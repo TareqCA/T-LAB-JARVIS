@@ -5,6 +5,10 @@
 
 #include <string>
 #include <algorithm>
+#include <cstring>
+#include <ctime>
+#include <cstdio>
+#include <cmath>
 
 #include <esp_log.h>
 #include <esp_err.h>
@@ -26,7 +30,7 @@ OledDisplay::OledDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handl
     auto text_font = std::make_shared<LvglBuiltInFont>(&BUILTIN_TEXT_FONT);
     auto icon_font = std::make_shared<LvglBuiltInFont>(&BUILTIN_ICON_FONT);
     auto large_icon_font = std::make_shared<LvglBuiltInFont>(&font_awesome_30_1);
-    
+
     auto dark_theme = new LvglTheme("dark");
     dark_theme->set_text_font(text_font);
     dark_theme->set_icon_font(icon_font);
@@ -65,7 +69,7 @@ OledDisplay::OledDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handl
             .buff_dma = 1,
             .buff_spiram = 0,
             .sw_rotate = 0,
-            .full_refresh = 0,
+            .full_refresh = (width_ == 128 && height_ == 128),
             .direct_mode = 0,
         },
     };
@@ -76,7 +80,9 @@ OledDisplay::OledDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handl
         return;
     }
 
-    if (height_ >= 64) {
+ if (width_ == 128 && height_ == 128) {
+    SetupUI_128x128();
+} else if (height_ >= 64) {
     SetupUI_128x64();
 } else {
     SetupUI_128x32();
@@ -84,6 +90,11 @@ OledDisplay::OledDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handl
 }
 
 OledDisplay::~OledDisplay() {
+    if (face_timer_) {
+        DisplayLockGuard lock(this);
+        lv_timer_delete(face_timer_);
+        face_timer_ = nullptr;
+    }
     if (content_ != nullptr) {
         lv_obj_del(content_);
     }
@@ -133,12 +144,18 @@ void OledDisplay::Unlock() {
 
 void OledDisplay::SetChatMessage(const char* role, const char* content) {
     DisplayLockGuard lock(this);
+    if (left_eye_) {
+        if (chat_message_label_) {
+            lv_label_set_text(chat_message_label_, (role && strcmp(role, "system") == 0 && content) ? content : "");
+        }
+        return;
+    }
     if (chat_message_label_ == nullptr) {
         return;
     }
 
     // Replace all newlines with spaces
-    std::string content_str = content;
+    std::string content_str = content ? content : "";
     std::replace(content_str.begin(), content_str.end(), '\n', ' ');
 
     if (content_right_ == nullptr) {
@@ -373,8 +390,14 @@ void OledDisplay::SetupUI_128x32() {
 }
 
 void OledDisplay::SetEmotion(const char* emotion) {
-    const char* utf8 = font_awesome_get_utf8(emotion);
+    if (!emotion) return;
     DisplayLockGuard lock(this);
+    if (left_eye_) {
+        happy_ = strcmp(emotion, "happy") == 0 || strcmp(emotion, "laughing") == 0 || strcmp(emotion, "excited") == 0;
+        UpdateFace();
+        return;
+    }
+    const char* utf8 = font_awesome_get_utf8(emotion);
     if (emotion_label_ == nullptr) {
         return;
     }
@@ -393,4 +416,165 @@ void OledDisplay::SetTheme(Theme* theme) {
 
     auto screen = lv_screen_active();
     lv_obj_set_style_text_font(screen, text_font, 0);
+}
+
+
+// T-Lab AI: monochrome face, no image assets or extra tasks.
+void OledDisplay::SetupUI_128x128() {
+    DisplayLockGuard lock(this);
+    auto screen = lv_screen_active();
+    auto theme = static_cast<LvglTheme*>(current_theme_);
+    lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    container_ = lv_obj_create(screen);
+    lv_obj_remove_style_all(container_);
+    lv_obj_set_size(container_, 128, 128);
+    lv_obj_center(container_);
+    lv_obj_remove_flag(container_, LV_OBJ_FLAG_SCROLLABLE);
+    auto shape = [](lv_obj_t* parent, bool white) {
+        auto o = lv_obj_create(parent);
+        lv_obj_remove_style_all(o);
+        lv_obj_set_style_bg_color(o, white ? lv_color_white() : lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+        return o;
+    };
+    auto label = [&](int x, int y, int w, const char* text) {
+        auto o = lv_label_create(container_);
+        lv_obj_set_style_text_font(o, theme->text_font()->font(), 0);
+        lv_obj_set_style_text_color(o, lv_color_white(), 0);
+        lv_obj_set_width(o, w);
+        lv_label_set_long_mode(o, LV_LABEL_LONG_CLIP);
+        lv_label_set_text(o, text);
+        lv_obj_set_pos(o, x, y);
+        return o;
+    };
+    status_label_ = label(4, 1, 94, "JARVIS");
+    network_label_ = label(100, 1, 27, "");
+    lv_obj_set_style_text_font(network_label_, theme->icon_font()->font(), 0);
+    mute_label_ = label(0, 0, 20, "");
+    battery_label_ = label(0, 0, 20, "");
+    lv_obj_add_flag(mute_label_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(battery_label_, LV_OBJ_FLAG_HIDDEN);
+    auto line = shape(container_, true);
+    lv_obj_set_size(line, 116, 1);
+    lv_obj_set_pos(line, 6, 20);
+    left_eye_ = shape(container_, true);
+    right_eye_ = shape(container_, true);
+    left_glint_ = shape(left_eye_, false);
+    right_glint_ = shape(right_eye_, false);
+    for (auto glint : {left_glint_, right_glint_}) {
+        lv_obj_set_size(glint, 7, 12);
+        lv_obj_set_pos(glint, 7, 6);
+        lv_obj_set_style_radius(glint, 3, 0);
+    }
+    mouth_ = shape(container_, true);
+    for (int i = 0; i < 5; ++i) {
+        wave_[i] = shape(container_, true);
+        lv_obj_set_style_radius(wave_[i], 2, 0);
+        lv_obj_add_flag(wave_[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    brand_label_ = label(0, 109, 128, "T-LAB AI");
+    lv_obj_set_style_text_align(brand_label_, LV_TEXT_ALIGN_CENTER, 0);
+    chat_message_label_ = label(2, 88, 124, "");
+    lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_CENTER, 0);
+    notification_label_ = label(2, 22, 124, "");
+    lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+    low_battery_popup_ = shape(container_, false);
+    lv_obj_set_size(low_battery_popup_, 124, 30);
+    lv_obj_set_pos(low_battery_popup_, 2, 88);
+    low_battery_label_ = lv_label_create(low_battery_popup_);
+    lv_obj_set_style_text_color(low_battery_label_, lv_color_white(), 0);
+    lv_label_set_text(low_battery_label_, Lang::Strings::BATTERY_NEED_CHARGE);
+    lv_obj_center(low_battery_label_);
+    lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
+    UpdateFace();
+    face_timer_ = lv_timer_create(FaceTimerCallback, 125, this);
+}
+
+void OledDisplay::FaceTimerCallback(lv_timer_t* timer) {
+    auto self = static_cast<OledDisplay*>(lv_timer_get_user_data(timer));
+    if (self) { ++self->face_tick_; self->UpdateFace(); }
+}
+
+void OledDisplay::UpdateFace() {
+    if (!left_eye_) return;
+    const auto t = face_tick_;
+    int h = 44, rh = 44, shift = 0, radius = 14;
+    bool wave = false;
+    switch (face_mode_) {
+        case FaceMode::Idle:
+            shift = static_cast<int>(8 * std::sin(t * 0.22));
+            h = rh = 44 + static_cast<int>(3 * std::sin(t * 0.35));
+            if (t % 40 == 37 || t % 40 == 39) h = rh = 22;
+            if (t % 40 == 38) h = rh = 5;
+            break;
+        case FaceMode::Listening: h = rh = 50 + static_cast<int>(4 * std::sin(t * 0.5)); shift = static_cast<int>(3 * std::sin(t * 0.3)); wave = true; break;
+        case FaceMode::Thinking: h = 38; rh = 28; shift = 4; wave = true; break;
+        case FaceMode::Speaking: h = rh = (happy_ ? 30 : 44) + static_cast<int>(5 * std::sin(t * 0.65)); wave = true;
+            if (t % 40 == 38) h = rh = 5;
+            break;
+        case FaceMode::Happy: h = rh = 27; break;
+        case FaceMode::Sleep: h = rh = 5; break;
+    }
+    auto eye = [&](lv_obj_t* o, lv_obj_t* glint, int x, int height) {
+        lv_obj_set_size(o, 40, height);
+        lv_obj_set_pos(o, x + shift, 60 - height / 2);
+        lv_obj_set_style_radius(o, radius, 0);
+        if (height < 24) lv_obj_add_flag(glint, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_remove_flag(glint, LV_OBJ_FLAG_HIDDEN);
+    };
+    eye(left_eye_, left_glint_, 16, h);
+    eye(right_eye_, right_glint_, 72, rh);
+    if (wave) lv_obj_add_flag(mouth_, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_remove_flag(mouth_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_size(mouth_, 18, 3);
+    lv_obj_set_pos(mouth_, 55, 96);
+    lv_obj_set_style_radius(mouth_, 2, 0);
+    for (int i = 0; i < 5; ++i) {
+        if (!wave) { lv_obj_add_flag(wave_[i], LV_OBJ_FLAG_HIDDEN); continue; }
+        lv_obj_remove_flag(wave_[i], LV_OBJ_FLAG_HIDDEN);
+        int bh = face_mode_ == FaceMode::Thinking ? 4 : 4 + ((t + i * 2) % 5) * 3;
+        lv_obj_set_size(wave_[i], 4, bh);
+        lv_obj_set_pos(wave_[i], 44 + i * 9, 96 - bh / 2);
+    }
+    if (face_mode_ == FaceMode::Idle && clock_enabled_) {
+        time_t now = time(nullptr);
+        if (now > 1700000000) {
+            struct tm utc = {};
+            gmtime_r(&now, &utc);
+            char buf[24];
+            snprintf(buf, sizeof(buf), "%02d:%02d UTC", utc.tm_hour, utc.tm_min);
+            if (strcmp(lv_label_get_text(status_label_), buf) != 0) lv_label_set_text(status_label_, buf);
+        }
+    }
+}
+
+void OledDisplay::SetStatus(const char* status) {
+    if (!left_eye_) { LvglDisplay::SetStatus(status); return; }
+    if (!status) return;
+    DisplayLockGuard lock(this);
+    clock_enabled_ = strcmp(status, Lang::Strings::STANDBY) == 0;
+    happy_ = false;
+    const char* footer = "T-LAB AI";
+    if (clock_enabled_) { face_mode_ = FaceMode::Idle; }
+    else if (strcmp(status, Lang::Strings::LISTENING) == 0) { face_mode_ = FaceMode::Listening; footer = "LISTENING"; }
+    else if (strcmp(status, Lang::Strings::SPEAKING) == 0) { face_mode_ = FaceMode::Speaking; footer = "SPEAKING"; }
+    else if (strcmp(status, Lang::Strings::CONNECTING) == 0) { face_mode_ = FaceMode::Thinking; footer = "CONNECTING"; }
+    else { face_mode_ = FaceMode::Idle; }
+    lv_label_set_text(status_label_, clock_enabled_ ? "JARVIS" : status);
+    lv_label_set_text(brand_label_, footer);
+    face_tick_ = 0;
+    UpdateFace();
+}
+
+void OledDisplay::SetPowerSaveMode(bool on) {
+    LvglDisplay::SetPowerSaveMode(on);
+    if (!left_eye_) return;
+    DisplayLockGuard lock(this);
+    face_mode_ = on ? FaceMode::Sleep : FaceMode::Idle;
+    clock_enabled_ = !on;
+    lv_label_set_text(brand_label_, on ? "SLEEPING" : "T-LAB AI");
+    UpdateFace();
 }

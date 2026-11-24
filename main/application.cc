@@ -181,6 +181,9 @@ void Application::Run() {
         MAIN_EVENT_ACTIVATION_DONE |
         MAIN_EVENT_STATE_CHANGED;
 
+    bool standby_armed = false;
+    auto previous_state = GetDeviceState();
+
     while (true) {
         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, portMAX_DELAY);
 
@@ -202,6 +205,10 @@ void Application::Run() {
         }
 
         if (bits & MAIN_EVENT_STATE_CHANGED) {
+            auto current_state = GetDeviceState();
+            standby_armed = (previous_state == kDeviceStateSpeaking &&
+                             current_state == kDeviceStateListening);
+            previous_state = current_state;
             HandleStateChangedEvent();
         }
 
@@ -230,6 +237,9 @@ void Application::Run() {
         }
 
         if (bits & MAIN_EVENT_VAD_CHANGE) {
+            if (GetDeviceState() == kDeviceStateListening && IsVoiceDetected()) {
+                standby_armed = false;
+            }
             if (GetDeviceState() == kDeviceStateListening) {
                 auto led = Board::GetInstance().GetLed();
                 led->OnStateChanged();
@@ -250,6 +260,21 @@ void Application::Run() {
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
         
+            // T-Lab AI: close only an unanswered follow-up window.
+            if (GetDeviceState() == kDeviceStateListening && standby_armed) {
+                if (IsVoiceDetected()) {
+                    standby_armed = false;
+                } else if (clock_ticks_ >= 10) {
+                    standby_armed = false;
+                    ESP_LOGI(TAG, "T-Lab AI: Auto Standby");
+                    if (protocol_ && protocol_->IsAudioChannelOpened()) {
+                        protocol_->CloseAudioChannel();
+                    } else {
+                        SetDeviceState(kDeviceStateIdle);
+                    }
+                }
+            }
+
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();

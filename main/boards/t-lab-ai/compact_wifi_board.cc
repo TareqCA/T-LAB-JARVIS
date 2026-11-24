@@ -89,6 +89,8 @@ io_config.flags.disable_control_phase = 0;
             esp_lcd_panel_disp_on_off(panel_, true)
         );
 
+        ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_, false));
+
         display_ = new OledDisplay(
             panel_io_,
             panel_,
