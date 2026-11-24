@@ -18,6 +18,10 @@ private:
     FaceMode face_mode_ = FaceMode::Idle;
     uint32_t face_tick_ = 0;
     bool happy_ = false, clock_enabled_ = false;
+    enum class Mood { Neutral, Happy, Laugh, Angry, Sad, Cry, Surprise, Confused, Sleepy };
+    Mood mood_ = Mood::Neutral;
+    lv_obj_t *left_lid_ = nullptr, *right_lid_ = nullptr;
+    lv_obj_t *tear_ = nullptr;
     void SetupUI_128x128();
     void SetupUI_128x64();
     void SetupUI_128x32();

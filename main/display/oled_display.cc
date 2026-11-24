@@ -393,7 +393,18 @@ void OledDisplay::SetEmotion(const char* emotion) {
     if (!emotion) return;
     DisplayLockGuard lock(this);
     if (left_eye_) {
-        happy_ = strcmp(emotion, "happy") == 0 || strcmp(emotion, "laughing") == 0 || strcmp(emotion, "excited") == 0;
+        ESP_LOGI(TAG, "Face emotion: %s", emotion);
+        auto is = [&](const char* name) { return strcmp(emotion, name) == 0; };
+        mood_ = Mood::Neutral;
+        if (is("happy") || is("excited") || is("loving")) mood_ = Mood::Happy;
+        else if (is("laughing") || is("funny")) mood_ = Mood::Laugh;
+        else if (is("angry")) mood_ = Mood::Angry;
+        else if (is("sad")) mood_ = Mood::Sad;
+        else if (is("crying")) mood_ = Mood::Cry;
+        else if (is("surprised") || is("shocked")) mood_ = Mood::Surprise;
+        else if (is("confused") || is("thinking")) mood_ = Mood::Confused;
+        else if (is("sleepy")) mood_ = Mood::Sleepy;
+        happy_ = mood_ == Mood::Happy || mood_ == Mood::Laugh;
         UpdateFace();
         return;
     }
@@ -469,6 +480,10 @@ void OledDisplay::SetupUI_128x128() {
         lv_obj_set_pos(glint, 7, 6);
         lv_obj_set_style_radius(glint, 3, 0);
     }
+    left_lid_ = shape(left_eye_, false);
+    right_lid_ = shape(right_eye_, false);
+    tear_ = shape(container_, true);
+    lv_obj_set_style_radius(tear_, 3, 0);
     mouth_ = shape(container_, true);
     for (int i = 0; i < 5; ++i) {
         wave_[i] = shape(container_, true);
@@ -518,20 +533,51 @@ void OledDisplay::UpdateFace() {
         case FaceMode::Happy: h = rh = 27; break;
         case FaceMode::Sleep: h = rh = 5; break;
     }
+    const Mood mood = face_mode_ == FaceMode::Sleep ? Mood::Sleepy : mood_;
+    int lw = 40, rw = 40, dy = 0, mw = 18, mh = 3;
+    bool lids = false, upper = false;
+    int angle = 0;
+    switch (mood) {
+        case Mood::Angry: h = rh = 34; lids = upper = true; angle = 220; radius = 8; mw = 24; mh = 5; break;
+        case Mood::Sad: case Mood::Cry: h = rh = 38; lids = upper = true; angle = -220; dy = 5; mw = 12; mh = 5; break;
+        case Mood::Happy: case Mood::Laugh: h = rh = 28; lids = true; radius = 14; mw = 26; mh = mood == Mood::Laugh ? 10 + (t % 4)*2 : 6; dy = mood == Mood::Laugh ? static_cast<int>(3 * std::sin(t * 0.8)) : 0; break;
+        case Mood::Surprise: h = rh = 56; lw = rw = 34; mw = mh = 13; break;
+        case Mood::Confused: h = 50; rh = 23; shift = 4; mw = 10; mh = 5; break;
+        case Mood::Sleepy: h = rh = 6; mw = 10; break;
+        default: break;
+    }
+    if (mood != Mood::Neutral) wave = false;
     auto eye = [&](lv_obj_t* o, lv_obj_t* glint, int x, int height) {
-        lv_obj_set_size(o, 40, height);
-        lv_obj_set_pos(o, x + shift, 60 - height / 2);
+        lv_obj_set_size(o, o == left_eye_ ? lw : rw, height);
+        lv_obj_set_pos(o, x + shift, 60 - height / 2 + dy);
         lv_obj_set_style_radius(o, radius, 0);
-        if (height < 24) lv_obj_add_flag(glint, LV_OBJ_FLAG_HIDDEN);
+        if (height < 24 || lids) lv_obj_add_flag(glint, LV_OBJ_FLAG_HIDDEN);
         else lv_obj_remove_flag(glint, LV_OBJ_FLAG_HIDDEN);
     };
     eye(left_eye_, left_glint_, 16, h);
     eye(right_eye_, right_glint_, 72, rh);
+    auto lid = [&](lv_obj_t* o, int a, int height) {
+        if (!lids) { lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN); return; }
+        lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_size(o, 56, upper ? 18 : 24);
+        lv_obj_set_pos(o, -8, upper ? -9 : height - 12);
+        lv_obj_set_style_radius(o, upper ? 0 : 14, 0);
+        lv_obj_set_style_transform_pivot_x(o, 28, 0);
+        lv_obj_set_style_transform_pivot_y(o, 9, 0);
+        lv_obj_set_style_transform_rotation(o, a, 0);
+    };
+    lid(left_lid_, angle, h);
+    lid(right_lid_, -angle, rh);
+    if (mood == Mood::Cry) {
+        lv_obj_remove_flag(tear_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_size(tear_, 5, 9);
+        lv_obj_set_pos(tear_, 23 + shift, 80 + (t % 8)*2);
+    } else lv_obj_add_flag(tear_, LV_OBJ_FLAG_HIDDEN);
     if (wave) lv_obj_add_flag(mouth_, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_remove_flag(mouth_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_size(mouth_, 18, 3);
-    lv_obj_set_pos(mouth_, 55, 96);
-    lv_obj_set_style_radius(mouth_, 2, 0);
+    lv_obj_set_size(mouth_, mw, mh);
+    lv_obj_set_pos(mouth_, 64 - mw / 2, 96 - mh / 2);
+    lv_obj_set_style_radius(mouth_, mh / 2, 0);
     for (int i = 0; i < 5; ++i) {
         if (!wave) { lv_obj_add_flag(wave_[i], LV_OBJ_FLAG_HIDDEN); continue; }
         lv_obj_remove_flag(wave_[i], LV_OBJ_FLAG_HIDDEN);
@@ -556,7 +602,10 @@ void OledDisplay::SetStatus(const char* status) {
     if (!status) return;
     DisplayLockGuard lock(this);
     clock_enabled_ = strcmp(status, Lang::Strings::STANDBY) == 0;
-    happy_ = false;
+    if (clock_enabled_ || strcmp(status, Lang::Strings::LISTENING) == 0 || strcmp(status, Lang::Strings::CONNECTING) == 0) {
+        happy_ = false;
+        mood_ = Mood::Neutral;
+    }
     const char* footer = "T-LAB AI";
     if (clock_enabled_) { face_mode_ = FaceMode::Idle; }
     else if (strcmp(status, Lang::Strings::LISTENING) == 0) { face_mode_ = FaceMode::Listening; footer = "LISTENING"; }
@@ -575,6 +624,8 @@ void OledDisplay::SetPowerSaveMode(bool on) {
     DisplayLockGuard lock(this);
     face_mode_ = on ? FaceMode::Sleep : FaceMode::Idle;
     clock_enabled_ = !on;
+    mood_ = Mood::Neutral;
+    happy_ = false;
     lv_label_set_text(brand_label_, on ? "SLEEPING" : "T-LAB AI");
     UpdateFace();
 }
